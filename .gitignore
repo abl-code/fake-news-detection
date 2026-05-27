@@ -1,3 +1,7 @@
+# =========================
+# Python Backend
+# =========================
+
 # Virtual environment
 venv/
 
@@ -9,11 +13,33 @@ __pycache__/
 # Trained model files
 *.pkl
 
+# Environment variables
+.env
+
 # Dataset files (too large for GitHub)
-data/
+backend/data/
 
 # VS Code settings
 .vscode/
 
-# Environment variables
-.env
+# macOS
+.DS_Store
+
+
+# =========================
+# React Frontend
+# =========================
+
+# Node modules
+frontend/node_modules/
+
+# Vite build output
+frontend/dist/
+
+# npm logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Optional frontend env files
+frontend/.env

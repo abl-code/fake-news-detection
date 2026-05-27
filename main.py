@@ -1,15 +1,18 @@
-from src.train   import load_data, train_model
-from src.predict import predict_news
+import sys, os
+sys.path.insert(0, os.path.dirname(__file__))
+
+from backend.src.train   import load_data, train_model
+from backend.src.predict import predict_news
 
 if __name__ == '__main__':
 
     # ── Step 1: Load and preprocess data ──────────────────────
     print("STEP 1 — Loading data")
-    df = load_data('data')
+    df = load_data(os.path.join('backend', 'data'))
 
-    # ── Step 2: Train the model ────────────────────────────────
-    print("\nSTEP 2 — Training model")
-    model, vectorizer = train_model(df)
+    # ── Step 2: Train all models, select best ─────────────────
+    print("\nSTEP 2 — Training models")
+    model, vectorizer, results = train_model(df, model_choice='best')
 
     # ── Step 3: Test with sample headlines ────────────────────
     print("\nSTEP 3 — Sample predictions")
