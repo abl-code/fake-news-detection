@@ -14,16 +14,11 @@ __pycache__/
 *.pkl
 
 # Environment variables
-.env
-
+frontend/.env
+backend/.env
 # Dataset files (too large for GitHub)
 backend/data/
 
-# VS Code settings
-.vscode/
-
-# macOS
-.DS_Store
 
 
 # =========================
@@ -41,5 +36,3 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# Optional frontend env files
-frontend/.env

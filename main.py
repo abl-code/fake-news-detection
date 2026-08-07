@@ -1,6 +1,4 @@
-import sys, os
-sys.path.insert(0, os.path.dirname(__file__))
-
+import os
 from backend.src.train   import load_data, train_model
 from backend.src.predict import predict_news
 

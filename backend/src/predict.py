@@ -1,5 +1,5 @@
 import pickle
-from backend.src.preprocess import clean_text
+from .preprocess import clean_text
 
 def predict_news(text, model=None, vectorizer=None):
     """

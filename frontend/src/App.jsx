@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from "react";
 
-const API = "http://localhost:5000";
+const API = import.meta.env.VITE_API_URL 
 
 const SAMPLE_URLS = [
   "https://www.bbc.com/news/world",
@@ -525,13 +525,13 @@ export default function FakeNewsDetector() {
             </div>
           )}
 
-          <p style={{ fontSize:12, color:"#9ca3af", marginTop:24, textAlign:"center", lineHeight:1.6 }}>
+          {/* <p style={{ fontSize:12, color:"#9ca3af", marginTop:24, textAlign:"center", lineHeight:1.6 }}>
             Backend: Flask · Models: {Object.keys(MODEL_DESCRIPTIONS).join(", ")}<br/>
             Run <code style={{ fontFamily:"'DM Mono',monospace", background:"#e5e7eb",
               padding:"1px 5px", borderRadius:4 }}>python -m src.app</code> from <code
               style={{ fontFamily:"'DM Mono',monospace", background:"#e5e7eb",
               padding:"1px 5px", borderRadius:4 }}>backend/</code>
-          </p>
+          </p> */}
 
         </div>
       </div>

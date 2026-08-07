@@ -7,35 +7,29 @@ Endpoints:
   GET  /health         -> status
 """
 
-import os, sys, re, pickle, nltk, requests
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+import os, re, pickle, requests
 
 from flask       import Flask, request, jsonify
 from flask_cors  import CORS
 from bs4         import BeautifulSoup
 from urllib.parse import urlparse
 
-nltk.download('stopwords', quiet=True)
-nltk.download('punkt',     quiet=True)
-nltk.download('punkt_tab', quiet=True)
-from nltk.corpus   import stopwords
-from nltk.tokenize import word_tokenize
+from .preprocess import clean_text
 
 app = Flask(__name__)
 CORS(app)
 
-STOP_WORDS = set(stopwords.words('english'))
 BASE       = os.path.dirname(__file__)
 MODEL_DIR  = os.path.join(BASE, '..')
 
 MODEL_FILES = {
     "Naive Bayes":         "model_naive_bayes",
     "Logistic Regression": "model_logistic_regression",
-    "Linear SVM":          "model_linear_svm",
+    "Decision Tree":       "model_decision_tree",
     "Random Forest":       "model_random_forest",
     "Gradient Boosting":   "model_gradient_boosting",
 }
-DEFAULT_MODEL = "Logistic Regression"
+DEFAULT_MODEL = "Gradient Boosting"
 _model_cache  = {}
 
 def load_vectorizer():
@@ -76,16 +70,6 @@ def available_models():
 VECTORIZER = load_vectorizer()
 print(f"Vectorizer: {'loaded' if VECTORIZER else 'NOT FOUND - run main.py first'}")
 print(f"Models available: {available_models()}")
-
-def clean_text(text):
-    if not isinstance(text, str):
-        return ''
-    text   = text.lower()
-    text   = re.sub(r'[^a-z\s]', '', text)
-    text   = re.sub(r'\s+', ' ', text).strip()
-    tokens = word_tokenize(text)
-    tokens = [t for t in tokens if t not in STOP_WORDS and len(t) > 1]
-    return ' '.join(tokens)
 
 HEADERS = {
     'User-Agent': (
@@ -208,4 +192,5 @@ def health():
                     'models': available_models()})
 
 if __name__ == '__main__':
+    # Dev-only fallback. Production uses gunicorn (see Dockerfile CMD).
     app.run(debug=True, port=5000)

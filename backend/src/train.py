@@ -1,68 +1,79 @@
 import os
-import sys
 import pickle
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.naive_bayes             import MultinomialNB
 from sklearn.linear_model            import LogisticRegression
-from sklearn.svm                     import LinearSVC
+from sklearn.tree                    import DecisionTreeClassifier
 from sklearn.ensemble                import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.calibration             import CalibratedClassifierCV
 from sklearn.model_selection         import train_test_split
 from sklearn.metrics                 import accuracy_score, classification_report, confusion_matrix
 
-# Resolve preprocess regardless of where the script is called from
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from src.preprocess import clean_text
+from .preprocess import clean_text
+
+
+def _load_isot_pair(true_path, fake_path, source_label):
+    """Load one True/Fake CSV pair in ISOT format (title, text, subject, date)."""
+    true_df          = pd.read_csv(true_path)
+    fake_df          = pd.read_csv(fake_path)
+    true_df['label'] = 'REAL'
+    fake_df['label'] = 'FAKE'
+
+    for df in [true_df, fake_df]:
+        df['title'] = df.get('title', pd.Series([''] * len(df))).fillna('')
+        df['text']  = df.get('text',  pd.Series([''] * len(df))).fillna('')
+
+    df = pd.concat([true_df, fake_df], ignore_index=True)[['title', 'text', 'label']]
+    print(f"  {source_label}: {len(df)} articles | "
+          f"{(df.label=='REAL').sum()} real, {(df.label=='FAKE').sum()} fake")
+    return df
 
 
 def load_data(data_dir='data'):
     """
-    Load dataset with FULL article text (not just headlines).
-    Priority:
-      1. ISOT True.csv + Fake.csv  — full Reuters/PolitiFact articles (best for full-text training)
-      2. Indian news CSVs + Fake.csv  — headlines + ctext body
-      3. Synthetic fallback
+    Load and COMBINE every dataset found under data_dir:
+      1. data/True.csv               + data/Fake.csv
+      2. data/News _dataset/True.csv + data/News _dataset/Fake.csv
+      3. data/news_summary.csv       + data/news_summary_more.csv  (REAL headlines,
+         paired 1:1 with sampled FAKE.csv rows to keep classes balanced)
+    Any source that isn't present on disk is simply skipped.
     """
 
-    true_path  = os.path.join(data_dir, 'True.csv')
-    fake_path  = os.path.join(data_dir, 'Fake.csv')
+    frames = []
+
+    print("Scanning for datasets...")
+
+    # ── ISOT pair at data root ──────────────────────────────────
+    root_true = os.path.join(data_dir, 'True.csv')
+    root_fake = os.path.join(data_dir, 'Fake.csv')
+    if os.path.exists(root_true) and os.path.exists(root_fake):
+        frames.append(_load_isot_pair(root_true, root_fake, 'data/True.csv + data/Fake.csv'))
+
+    # ── ISOT pair inside News _dataset subfolder ────────────────
+    sub_dir  = os.path.join(data_dir, 'News _dataset')
+    sub_true = os.path.join(sub_dir, 'True.csv')
+    sub_fake = os.path.join(sub_dir, 'Fake.csv')
+    if os.path.exists(sub_true) and os.path.exists(sub_fake):
+        frames.append(_load_isot_pair(sub_true, sub_fake, 'News _dataset/True.csv + Fake.csv'))
+
+    # ── Indian news headlines (REAL) balanced against Fake.csv ──
     news1_path = os.path.join(data_dir, 'news_summary.csv')
     news2_path = os.path.join(data_dir, 'news_summary_more.csv')
-
-    # ── OPTION 1: ISOT full-text dataset (preferred) ────────────
-    if os.path.exists(true_path) and os.path.exists(fake_path):
-        print("Loading ISOT full-text dataset (True.csv + Fake.csv)...")
-        true_df          = pd.read_csv(true_path)
-        fake_df          = pd.read_csv(fake_path)
-        true_df['label'] = 'REAL'
-        fake_df['label'] = 'FAKE'
-
-        # ISOT columns: title, text, subject, date
-        # Combine title + full text for richer features
-        for df in [true_df, fake_df]:
-            df['title'] = df.get('title', pd.Series([''] * len(df))).fillna('')
-            df['text']  = df.get('text',  pd.Series([''] * len(df))).fillna('')
-
-        df = pd.concat([true_df, fake_df], ignore_index=True)
-        print(f"ISOT dataset: {len(df)} articles | "
-              f"{(df.label=='REAL').sum()} real, {(df.label=='FAKE').sum()} fake")
-
-    # ── OPTION 2: Indian news + Fake.csv ────────────────────────
-    elif os.path.exists(news1_path):
-        print("Loading Indian news dataset...")
+    if os.path.exists(news1_path):
         news1_df  = pd.read_csv(news1_path, encoding='iso-8859-1')
         news2_df  = pd.read_csv(news2_path, encoding='iso-8859-1') if os.path.exists(news2_path) else pd.DataFrame()
         indian_df = pd.concat([news1_df, news2_df], ignore_index=True)
 
         indian_df['title'] = indian_df['headlines'].fillna('')
-        indian_df['text']  = indian_df['ctext'].fillna('')   # full article body
+        indian_df['text']  = indian_df['ctext'].fillna('')
         indian_df['label'] = 'REAL'
         indian_df = indian_df[['title', 'text', 'label']]
-        print(f"Indian news: {len(indian_df)} articles")
+        print(f"  Indian news (news_summary*.csv): {len(indian_df)} REAL articles")
 
-        if os.path.exists(fake_path):
-            fake_df          = pd.read_csv(fake_path)
+        # Balance against a FAKE source if one exists
+        fake_source = root_fake if os.path.exists(root_fake) else (sub_fake if os.path.exists(sub_fake) else None)
+        if fake_source:
+            fake_df          = pd.read_csv(fake_source)
             fake_df['label'] = 'FAKE'
             fake_df['title'] = fake_df.get('title', pd.Series([''] * len(fake_df))).fillna('')
             fake_df['text']  = fake_df.get('text',  pd.Series([''] * len(fake_df))).fillna('')
@@ -71,45 +82,21 @@ def load_data(data_dir='data'):
             n         = min(len(indian_df), len(fake_df))
             indian_df = indian_df.sample(n, random_state=42)
             fake_df   = fake_df.sample(n,   random_state=42)
-            df        = pd.concat([indian_df, fake_df], ignore_index=True)
-            print(f"Balanced: {n} real + {n} fake = {len(df)} total")
+            print(f"  Balancing Indian news with {n} extra sampled FAKE rows")
+            frames.append(pd.concat([indian_df, fake_df], ignore_index=True))
         else:
-            df = indian_df
+            frames.append(indian_df)
 
-    # ── OPTION 3: Synthetic fallback ────────────────────────────
-    else:
-        print("No CSVs found — using built-in sample dataset...")
-        true_texts = [
-            ("Federal Reserve raises interest rates",
-             "The Federal Reserve raised its benchmark interest rate by 0.25 percentage points on Wednesday, "
-             "the latest in a series of increases aimed at combating inflation that remains well above the "
-             "central bank's 2 percent target. Fed Chair Jerome Powell said the decision was unanimous."),
-            ("NASA confirms Mars rover landing",
-             "NASA's Perseverance rover successfully touched down on Mars on Thursday, landing in the "
-             "Jezero Crater as planned. Scientists celebrated at mission control as telemetry confirmed "
-             "the rover survived the harrowing entry, descent and landing sequence."),
-            ("Senate passes infrastructure bill",
-             "The Senate passed a sweeping $1.2 trillion infrastructure bill on Tuesday with broad "
-             "bipartisan support, sending the legislation to the House. The bill funds roads, bridges, "
-             "broadband internet and public transit across the United States."),
-        ]
-        fake_texts = [
-            ("BREAKING: Mind control chemicals in tap water EXPOSED",
-             "A whistleblower from inside the government has revealed that fluoride added to the public "
-             "water supply contains nanobots designed to make citizens docile and controllable. "
-             "Mainstream media is suppressing this BOMBSHELL story. Share before it gets deleted!"),
-            ("SHOCKING: Microchip found in vaccine",
-             "A lab analysis of COVID vaccines has confirmed the presence of microscopic tracking devices "
-             "linked to Bill Gates and the globalist agenda. Multiple doctors have been silenced for "
-             "speaking out. The deep state does not want you to know this truth."),
-            ("BOMBSHELL: Secret elite meeting confirms depopulation",
-             "Leaked documents from a secret meeting of world leaders confirm a coordinated plan to "
-             "reduce global population by 90 percent using engineered food shortages and tainted "
-             "pharmaceuticals. This is not a conspiracy theory — it is happening NOW."),
-        ]
-        rows = ([{'title': t, 'text': b, 'label': 'REAL'} for t, b in true_texts] +
-                [{'title': t, 'text': b, 'label': 'FAKE'} for t, b in fake_texts])
-        df = pd.DataFrame(rows)
+    if not frames:
+        raise FileNotFoundError(
+            f"No datasets found under '{data_dir}'. Expected True.csv/Fake.csv "
+            f"(at data root and/or in a 'News _dataset' subfolder) and/or "
+            f"news_summary.csv."
+        )
+
+    df = pd.concat(frames, ignore_index=True)
+    print(f"\nCombined raw dataset: {len(df)} articles from {len(frames)} source(s) | "
+          f"{(df.label=='REAL').sum()} real, {(df.label=='FAKE').sum()} fake")
 
     # ── Combine title + full text, clean ────────────────────────
     df = df.sample(frac=1, random_state=42).reset_index(drop=True)
@@ -135,9 +122,8 @@ def _build_candidates():
         "Logistic Regression": LogisticRegression(
                                    max_iter=1000, C=5.0,
                                    solver='lbfgs', random_state=42),
-        "Linear SVM":          CalibratedClassifierCV(
-                                   LinearSVC(max_iter=3000, C=1.0,
-                                             random_state=42)),
+        "Decision Tree":       DecisionTreeClassifier(
+                                   max_depth=20, random_state=42),
         "Random Forest":       RandomForestClassifier(
                                    n_estimators=200, random_state=42, n_jobs=-1),
         "Gradient Boosting":   GradientBoostingClassifier(
@@ -151,8 +137,9 @@ def train_model(df, model_choice='best'):
     Train all candidate models on full-text TF-IDF features.
     Saves ALL models to disk so the API can switch between them at runtime.
 
-    model_choice: 'best' | a specific model name
-    Returns: (best_model, vectorizer, results_dict)
+    model_choice: 'best' | 'Gradient Boosting' (default, matches backend
+                  DEFAULT_MODEL) | any other specific model name
+    Returns: (final_model, vectorizer, results_dict)
     """
 
     X_train, X_test, y_train, y_test = train_test_split(
