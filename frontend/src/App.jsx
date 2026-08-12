@@ -1,19 +1,17 @@
 import { useState, useRef, useEffect } from "react";
 
-const API = import.meta.env.VITE_API_URL 
+const API = import.meta.env.VITE_API_URL;
 
 const SAMPLE_URLS = [
   "https://www.bbc.com/news/world",
   "https://timesofindia.indiatimes.com/",
   "https://theonion.com/",
+  "https://x.com/",
 ];
 
-const MODEL_DESCRIPTIONS = {
-  "Logistic Regression": "Best overall — strong on full-length articles",
-  "Linear SVM":          "Fast, close accuracy to LR",
-  "Gradient Boosting":   "Highest nuance, slower inference",
-  "Random Forest":       "Robust ensemble, moderate speed",
-  "Naive Bayes":         "Baseline — fastest, good for headlines",
+const PLATFORM_LABELS = {
+  x: "X / Twitter", facebook: "Facebook", instagram: "Instagram",
+  manual: "Pasted text", web: "News site",
 };
 
 function ConfidenceRing({ value, label, color }) {
@@ -56,45 +54,52 @@ function Spinner() {
   );
 }
 
+function AiDetectionBadge({ result }) {
+  if (result.ai_label === undefined) return null;   // detector wasn't loaded server-side
+
+  const isAI  = result.ai_label === "AI";
+  const color = isAI ? "#7c3aed" : "#0891b2";
+  const bg    = isAI ? "#f5f3ff" : "#ecfeff";
+
+  return (
+    <div style={{ marginBottom:20 }}>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between",
+        marginBottom:6 }}>
+        <span style={{ display:"inline-flex", alignItems:"center", gap:6, background:bg, color,
+          borderRadius:100, padding:"4px 14px", fontSize:12, fontWeight:600,
+          letterSpacing:"0.05em", textTransform:"uppercase" }}>
+          <span style={{ width:7, height:7, borderRadius:"50%", background:color }}/>
+          {isAI ? "Likely AI-Written" : "Likely Human-Written"}
+        </span>
+        <span style={{ fontFamily:"'DM Mono',monospace", fontSize:12, color:"#6b7280" }}>
+          {result.ai_probability}% AI probability
+        </span>
+      </div>
+      <div style={{ height:6, background:"#e5e7eb", borderRadius:100, overflow:"hidden" }}>
+        <div style={{ height:"100%", borderRadius:100, width:`${result.ai_probability}%`,
+          background: color, transition:"width 0.9s cubic-bezier(.4,0,.2,1)" }}/>
+      </div>
+      <p style={{ fontSize:11, color:"#9ca3af", margin:"5px 0 0", lineHeight:1.5 }}>
+        Style-based detection ({result.ai_confidence}% confidence) — AI-text detectors
+        are known to be unreliable, especially on edited or non-native English writing.
+        Treat this as a signal, not a verdict.
+      </p>
+    </div>
+  );
+}
+
 export default function FakeNewsDetector() {
-  const [mode, setMode]             = useState("url");      // "url" | "text"
+  const [mode, setMode]             = useState("url");
   const [url, setUrl]               = useState("");
   const [articleText, setArticleText] = useState("");
   const [articleTitle, setArticleTitle] = useState("");
-  const [selectedModel, setSelectedModel] = useState("Logistic Regression");
-  const [availableModels, setAvailableModels] = useState([]);
-  const [showModelMenu, setShowModelMenu] = useState(false);
   const [status, setStatus]         = useState("idle");
   const [result, setResult]         = useState(null);
   const [errorMsg, setErrorMsg]     = useState("");
   const [showPreview, setShowPreview] = useState(false);
-  const inputRef  = useRef(null);
-  const menuRef   = useRef(null);
+  const inputRef = useRef(null);
 
   useEffect(() => { inputRef.current?.focus(); }, [mode]);
-
-  useEffect(() => {
-    fetch(`${API}/models`)
-      .then(r => r.json())
-      .then(data => {
-        if (data.models?.length) {
-          setAvailableModels(data.models);
-          setSelectedModel(data.default || data.models[0]);
-        }
-      })
-      .catch(() => {
-        setAvailableModels(Object.keys(MODEL_DESCRIPTIONS));
-      });
-  }, []);
-
-  useEffect(() => {
-    function handleClick(e) {
-      if (menuRef.current && !menuRef.current.contains(e.target))
-        setShowModelMenu(false);
-    }
-    document.addEventListener("mousedown", handleClick);
-    return () => document.removeEventListener("mousedown", handleClick);
-  }, []);
 
   async function analyze() {
     setStatus("loading");
@@ -115,7 +120,7 @@ export default function FakeNewsDetector() {
         res = await fetch(`${API}/predict`, {
           method:"POST",
           headers:{"Content-Type":"application/json"},
-          body: JSON.stringify({ url: trimmed, model: selectedModel }),
+          body: JSON.stringify({ url: trimmed }),
         });
       } else {
         const trimmed = articleText.trim();
@@ -126,7 +131,7 @@ export default function FakeNewsDetector() {
         res = await fetch(`${API}/predict-text`, {
           method:"POST",
           headers:{"Content-Type":"application/json"},
-          body: JSON.stringify({ text: trimmed, title: articleTitle.trim(), model: selectedModel }),
+          body: JSON.stringify({ text: trimmed, title: articleTitle.trim() }),
         });
       }
 
@@ -212,29 +217,6 @@ export default function FakeNewsDetector() {
         .analyze-btn:active:not(:disabled) { transform:scale(0.97); }
         .analyze-btn:disabled { opacity:0.45; cursor:not-allowed; }
 
-        .model-btn {
-          display:flex; align-items:center; gap:8px;
-          background:#fff; border:1.5px solid #e5e7eb; border-radius:10px;
-          padding:9px 14px; font-size:13px; font-family:'DM Mono',monospace;
-          cursor:pointer; color:#111; transition:border-color .15s;
-          white-space:nowrap;
-        }
-        .model-btn:hover { border-color:#9ca3af; }
-
-        .model-menu {
-          position:absolute; top:calc(100% + 6px); left:0; right:0; z-index:100;
-          background:#fff; border:1.5px solid #e5e7eb; border-radius:12px;
-          box-shadow:0 8px 24px rgba(0,0,0,0.1); overflow:hidden;
-        }
-        .model-option {
-          width:100%; text-align:left; background:none; border:none; cursor:pointer;
-          padding:10px 14px; font-family:'DM Sans',sans-serif; font-size:13px;
-          color:#374151; transition:background .1s;
-        }
-        .model-option:hover { background:#f9f7f4; }
-        .model-option.selected { background:#f3f4f6; color:#111; font-weight:500; }
-        .model-option-desc { font-size:11px; color:#9ca3af; display:block; margin-top:1px; }
-
         .reset-btn {
           background:none; border:1.5px solid #d1d5db; border-radius:8px;
           padding:7px 16px; font-size:13px; cursor:pointer; color:#6b7280;
@@ -250,6 +232,9 @@ export default function FakeNewsDetector() {
           display:inline-flex; align-items:center; gap:5px;
           background:#f3f4f6; border-radius:6px; padding:4px 10px;
           font-size:12px; color:#4b5563; font-family:'DM Mono',monospace;
+        }
+        .platform-chip {
+          background:#111; color:#f9f7f4;
         }
         .preview-text {
           font-size:13px; line-height:1.7; color:#4b5563;
@@ -274,6 +259,10 @@ export default function FakeNewsDetector() {
           font-size:11px; color:#9ca3af; text-align:right; margin-top:4px;
           font-family:'DM Mono',monospace;
         }
+        .note-banner {
+          font-size:12px; color:#92400e; background:#fffbeb; border:1px solid #fde68a;
+          border-radius:8px; padding:10px 14px; margin-top:12px; line-height:1.5;
+        }
       `}</style>
 
       <div style={{ minHeight:"100vh", background:"#f9f7f4", padding:"40px 16px", fontFamily:"'DM Sans',sans-serif" }}>
@@ -285,14 +274,15 @@ export default function FakeNewsDetector() {
               borderRadius:8, padding:"3px 10px", fontSize:11,
               fontFamily:"'DM Mono',monospace", letterSpacing:"0.1em",
               textTransform:"uppercase", marginBottom:14 }}>
-              ML · TF-IDF · Multi-Model
+              ML · TF-IDF · Random Forest
             </div>
             <h1 style={{ fontFamily:"'DM Serif Display',serif", fontSize:38, fontWeight:400,
               margin:"0 0 8px", color:"#111", lineHeight:1.15 }}>
               Fake News<br /><em>Detector</em>
             </h1>
             <p style={{ fontSize:15, color:"#6b7280", margin:0, lineHeight:1.6 }}>
-              Classify any news article by URL or by pasting the text directly.
+              Classify news or social posts by URL, or by pasting text directly.
+              Also flags likely AI-generated text.
             </p>
           </div>
 
@@ -300,7 +290,6 @@ export default function FakeNewsDetector() {
           <div style={{ background:"#fff", border:"1.5px solid #e5e7eb", borderRadius:16,
             padding:20, marginBottom:20 }}>
 
-            {/* Mode tabs */}
             <div style={{ display:"flex", gap:4, background:"#f3f4f6", borderRadius:10,
               padding:4, marginBottom:18 }}>
               <button className={`mode-tab${mode==="url"?" active":""}`}
@@ -313,16 +302,15 @@ export default function FakeNewsDetector() {
               </button>
             </div>
 
-            {/* URL mode */}
             {mode === "url" && (
               <>
                 <label style={{ fontSize:12, fontWeight:500, color:"#374151",
                   display:"block", marginBottom:8, letterSpacing:"0.04em" }}>
-                  ARTICLE URL
+                  ARTICLE OR POST URL
                 </label>
                 <div style={{ display:"flex", gap:10, marginBottom:12 }}>
                   <input ref={inputRef} className="url-input" type="url"
-                    placeholder="https://example.com/news/article"
+                    placeholder="https://example.com/news/article or https://x.com/..."
                     value={url} onChange={e => setUrl(e.target.value)}
                     onKeyDown={e => e.key==="Enter" && canSubmit && analyze()}
                     disabled={status==="loading"}/>
@@ -345,27 +333,30 @@ export default function FakeNewsDetector() {
                     </button>
                   ))}
                 </div>
+                <div className="note-banner">
+                  Note: Instagram and Facebook posts can't be scraped without login —
+                  switch to "Paste text" mode for those. X/Twitter works for public posts only.
+                </div>
               </>
             )}
 
-            {/* Text mode */}
             {mode === "text" && (
               <>
                 <label style={{ fontSize:12, fontWeight:500, color:"#374151",
                   display:"block", marginBottom:8, letterSpacing:"0.04em" }}>
-                  ARTICLE TITLE <span style={{ color:"#9ca3af", fontWeight:400 }}>(optional)</span>
+                  TITLE <span style={{ color:"#9ca3af", fontWeight:400 }}>(optional)</span>
                 </label>
                 <input className="title-input" type="text"
-                  placeholder="Enter the article headline…"
+                  placeholder="Enter the headline…"
                   value={articleTitle} onChange={e => setArticleTitle(e.target.value)}
                   style={{ marginBottom:12 }}/>
 
                 <label style={{ fontSize:12, fontWeight:500, color:"#374151",
                   display:"block", marginBottom:8, letterSpacing:"0.04em" }}>
-                  ARTICLE TEXT
+                  TEXT
                 </label>
                 <textarea ref={inputRef} className="text-input"
-                  placeholder="Paste the full article body here. The more text, the more accurate the prediction…"
+                  placeholder="Paste the article or post text here. The more text, the more accurate the prediction…"
                   value={articleText} onChange={e => setArticleText(e.target.value)}
                   disabled={status==="loading"}/>
                 <div className="word-count">
@@ -386,49 +377,18 @@ export default function FakeNewsDetector() {
             )}
           </div>
 
-          {/* Model selector */}
-          <div style={{ position:"relative", marginBottom:20 }} ref={menuRef}>
-            <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-              <span style={{ fontSize:12, color:"#6b7280", fontWeight:500,
-                letterSpacing:"0.04em", textTransform:"uppercase", whiteSpace:"nowrap" }}>
-                Model
-              </span>
-              <button className="model-btn" onClick={() => setShowModelMenu(v => !v)}
-                style={{ flex:1 }}>
-                <span style={{ flex:1, textAlign:"left" }}>{selectedModel}</span>
-                <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"
-                  style={{ transform: showModelMenu ? "rotate(180deg)" : "none", transition:"transform .2s" }}>
-                  <path d="M3 5l4 4 4-4" stroke="#6b7280" strokeWidth="1.5" strokeLinecap="round"/>
-                </svg>
-              </button>
-            </div>
-            {showModelMenu && (
-              <div className="model-menu">
-                {(availableModels.length ? availableModels : Object.keys(MODEL_DESCRIPTIONS)).map(name => (
-                  <button key={name} className={`model-option${name===selectedModel?" selected":""}`}
-                    onClick={() => { setSelectedModel(name); setShowModelMenu(false); }}>
-                    {name}
-                    <span className="model-option-desc">{MODEL_DESCRIPTIONS[name]}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Loading */}
           {status === "loading" && (
             <div style={{ display:"flex", alignItems:"center", gap:12, color:"#6b7280",
               fontSize:14, padding:"4px 0", animation:"fadeUp .3s ease" }}>
               <Spinner/>
               <span>
                 {mode==="url"
-                  ? "Fetching page → extracting text → running classifier…"
-                  : `Running ${selectedModel} classifier…`}
+                  ? "Fetching content → extracting text → running classifiers…"
+                  : "Running Random Forest classifiers…"}
               </span>
             </div>
           )}
 
-          {/* Error */}
           {status === "error" && (
             <div style={{ background:"#fef2f2", border:"1.5px solid #fecaca", borderRadius:12,
               padding:"14px 18px", animation:"fadeUp .3s ease",
@@ -448,7 +408,6 @@ export default function FakeNewsDetector() {
             </div>
           )}
 
-          {/* Result */}
           {status === "result" && result && (
             <div className="result-card">
 
@@ -458,7 +417,7 @@ export default function FakeNewsDetector() {
                   <div style={{ display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" }}>
                     <Pill label={`Likely ${verdict.word}`} color={verdict.color} bg={verdict.bg}/>
                     <span style={{ fontSize:11, color:"#9ca3af", fontFamily:"'DM Mono',monospace" }}>
-                      via {result.model_used}
+                      via Random Forest
                     </span>
                   </div>
                   <p style={{ margin:"10px 0 0", fontFamily:"'DM Serif Display',serif",
@@ -466,13 +425,15 @@ export default function FakeNewsDetector() {
                     {result.title || result.domain}
                   </p>
                 </div>
-                <button className="reset-btn" onClick={reset} style={{ flexShrink:0 }}>New URL</button>
+                <button className="reset-btn" onClick={reset} style={{ flexShrink:0 }}>New</button>
               </div>
 
               <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:24 }}>
+                <span className="meta-chip platform-chip">
+                  {PLATFORM_LABELS[result.platform] || result.domain}
+                </span>
                 <span className="meta-chip">{result.domain}</span>
                 <span className="meta-chip">{result.word_count.toLocaleString()} words</span>
-                <span className="meta-chip">{mode === "text" ? "pasted text" : "scraped"}</span>
               </div>
 
               <div style={{ display:"flex", justifyContent:"center", gap:32,
@@ -501,16 +462,18 @@ export default function FakeNewsDetector() {
                   {result.confidence >= 85
                     ? "High confidence — the model is very certain about this classification."
                     : result.confidence >= 65
-                      ? "Moderate confidence — review the article preview for context."
+                      ? "Moderate confidence — review the preview for context."
                       : "Low confidence — treat this result with caution."}
                 </p>
               </div>
+
+              <AiDetectionBadge result={result}/>
 
               <div>
                 <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between" }}>
                   <span style={{ fontSize:12, fontWeight:500, color:"#374151",
                     letterSpacing:"0.04em", textTransform:"uppercase" }}>
-                    Article preview
+                    Content preview
                   </span>
                   <button className="toggle-preview" onClick={() => setShowPreview(v => !v)}>
                     {showPreview ? "Hide" : "Show"} preview
@@ -524,14 +487,6 @@ export default function FakeNewsDetector() {
               </div>
             </div>
           )}
-
-          {/* <p style={{ fontSize:12, color:"#9ca3af", marginTop:24, textAlign:"center", lineHeight:1.6 }}>
-            Backend: Flask · Models: {Object.keys(MODEL_DESCRIPTIONS).join(", ")}<br/>
-            Run <code style={{ fontFamily:"'DM Mono',monospace", background:"#e5e7eb",
-              padding:"1px 5px", borderRadius:4 }}>python -m src.app</code> from <code
-              style={{ fontFamily:"'DM Mono',monospace", background:"#e5e7eb",
-              padding:"1px 5px", borderRadius:4 }}>backend/</code>
-          </p> */}
 
         </div>
       </div>

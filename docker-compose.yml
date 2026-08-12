@@ -6,6 +6,13 @@ services:
     ports:
       - "5000:5000"
     restart: unless-stopped
+    # AI detector's char n-gram + RF (250 trees) training at build time,
+    # plus HC3 download, is memory-hungry — give the build stage headroom
+    # if you hit OOM kills during `docker compose up --build`.
+    deploy:
+      resources:
+        limits:
+          memory: 4g
 
   frontend:
     build:

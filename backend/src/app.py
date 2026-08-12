@@ -1,10 +1,9 @@
 """
 app.py  —  Flask backend for Fake News Detector
 Endpoints:
-  POST /predict        { "url": "...", "model": "Logistic Regression" }
-  POST /predict-text   { "text": "...", "model": "Naive Bayes" }
-  GET  /models         -> list of available models
-  GET  /health         -> status
+  POST /predict        { "url": "..." }
+  POST /predict-text   { "text": "...", "title": "..." }
+  GET  /health          -> status
 """
 
 import os, re, pickle, requests
@@ -15,23 +14,47 @@ from bs4         import BeautifulSoup
 from urllib.parse import urlparse
 
 from .preprocess import clean_text
+# ── near the top, alongside VECTORIZER / MODEL loading ──
+import numpy as np
+from scipy.sparse import hstack, csr_matrix
+from .train_ai_detector import stylometric_features  # reuse feature logic
 
 app = Flask(__name__)
 CORS(app)
 
-BASE       = os.path.dirname(__file__)
-MODEL_DIR  = os.path.join(BASE, '..')
+BASE      = os.path.dirname(__file__)
+MODEL_DIR = os.path.join(BASE, '..')
+def load_pickle(name):
+    path = os.path.join(MODEL_DIR, name)
+    if not os.path.exists(path):
+        return None
+    with open(path, 'rb') as f:
+        return pickle.load(f)
 
-MODEL_FILES = {
-    "Naive Bayes":         "model_naive_bayes",
-    "Logistic Regression": "model_logistic_regression",
-    "Decision Tree":       "model_decision_tree",
-    "Random Forest":       "model_random_forest",
-    "Gradient Boosting":   "model_gradient_boosting",
-}
-DEFAULT_MODEL = "Gradient Boosting"
-_model_cache  = {}
+AI_MODEL    = load_pickle('ai_detector_model.pkl')
+AI_WORD_VEC = load_pickle('ai_detector_word_vec.pkl')
+AI_CHAR_VEC = load_pickle('ai_detector_char_vec.pkl')
+print(f"AI detector: {'loaded' if AI_MODEL else 'NOT FOUND - run main.py first'}")
 
+
+def run_ai_detection(text):
+    """Returns None if the AI detector isn't available (fails soft)."""
+    if not (AI_MODEL and AI_WORD_VEC and AI_CHAR_VEC):
+        return None
+    X_word  = AI_WORD_VEC.transform([text])
+    X_char  = AI_CHAR_VEC.transform([text])
+    X_style = csr_matrix(stylometric_features([text]))
+    X = hstack([X_word, X_char, X_style]).tocsr()
+
+    label   = AI_MODEL.predict(X)[0]
+    proba   = AI_MODEL.predict_proba(X)[0]
+    classes = list(AI_MODEL.classes_)
+    ai_prob = float(proba[classes.index('AI')]) * 100
+    return {
+        'ai_label':      label,                       # "AI" or "HUMAN"
+        'ai_probability': round(ai_prob, 1),
+        'ai_confidence': round(float(max(proba)) * 100, 1),
+    }
 def load_vectorizer():
     path = os.path.join(MODEL_DIR, 'vectorizer.pkl')
     if not os.path.exists(path):
@@ -39,37 +62,17 @@ def load_vectorizer():
     with open(path, 'rb') as f:
         return pickle.load(f)
 
-def load_model(name):
-    if name in _model_cache:
-        return _model_cache[name]
-    filename = MODEL_FILES.get(name)
-    if filename:
-        path = os.path.join(MODEL_DIR, f'{filename}.pkl')
-        if os.path.exists(path):
-            with open(path, 'rb') as f:
-                model = pickle.load(f)
-            _model_cache[name] = model
-            return model
-    fallback = os.path.join(MODEL_DIR, 'model.pkl')
-    if os.path.exists(fallback):
-        with open(fallback, 'rb') as f:
-            model = pickle.load(f)
-        _model_cache[name] = model
-        return model
-    return None
-
-def available_models():
-    found = []
-    for name, filename in MODEL_FILES.items():
-        if os.path.exists(os.path.join(MODEL_DIR, f'{filename}.pkl')):
-            found.append(name)
-    if not found and os.path.exists(os.path.join(MODEL_DIR, 'model.pkl')):
-        found = list(MODEL_FILES.keys())
-    return found
+def load_model():
+    path = os.path.join(MODEL_DIR, 'model.pkl')
+    if not os.path.exists(path):
+        return None
+    with open(path, 'rb') as f:
+        return pickle.load(f)
 
 VECTORIZER = load_vectorizer()
+MODEL      = load_model()
 print(f"Vectorizer: {'loaded' if VECTORIZER else 'NOT FOUND - run main.py first'}")
-print(f"Models available: {available_models()}")
+print(f"Model (Random Forest): {'loaded' if MODEL else 'NOT FOUND - run main.py first'}")
 
 HEADERS = {
     'User-Agent': (
@@ -77,21 +80,71 @@ HEADERS = {
         'AppleWebKit/537.36 (KHTML, like Gecko) '
         'Chrome/124.0.0.0 Safari/537.36'
     ),
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'DNT': '1',
-    'Connection': 'keep-alive',
-    'Upgrade-Insecure-Requests': '1',
-    'Sec-Fetch-Dest': 'document',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Site': 'none',
 }
+
+# ── Platform detection ───────────────────────────────────────────
+SOCIAL_PLATFORMS = {
+    'x.com': 'x', 'twitter.com': 'x',
+    'facebook.com': 'facebook', 'fb.watch': 'facebook',
+    'instagram.com': 'instagram',
+}
+
+def detect_platform(netloc):
+    host = netloc.replace('www.', '').replace('m.', '')
+    for domain, name in SOCIAL_PLATFORMS.items():
+        if host == domain or host.endswith('.' + domain):
+            return name
+    return None
+
+def fetch_x_via_oembed(url):
+    """X/Twitter's public oEmbed endpoint returns post HTML without auth,
+    for PUBLIC posts only. This is the only reliable no-auth path for X."""
+    try:
+        resp = requests.get(
+            'https://publish.twitter.com/oembed',
+            params={'url': url, 'omit_script': 'true'},
+            headers=HEADERS, timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        soup = BeautifulSoup(data.get('html', ''), 'html.parser')
+        text = soup.get_text(separator=' ', strip=True)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return {
+            'title': data.get('author_name', 'X post'),
+            'body_text': text,
+            'preview': text[:500] + ('...' if len(text) > 500 else ''),
+            'domain': 'x.com',
+            'word_count': len(text.split()),
+        }
+    except Exception:
+        raise ConnectionError(
+            "Couldn't retrieve that X/Twitter post. It may be private, "
+            "deleted, or the post has too little text — try pasting the "
+            "text directly instead."
+        )
 
 def fetch_article(url):
     parsed = urlparse(url)
     if parsed.scheme not in ('http', 'https'):
         raise ValueError("URL must start with http:// or https://")
+
+    platform = detect_platform(parsed.netloc)
+
+    if platform == 'x':
+        return fetch_x_via_oembed(url)
+
+    if platform in ('facebook', 'instagram'):
+        raise ConnectionError(
+            f"{platform.capitalize()} posts require you to be logged in to view, "
+            "so this app can't scrape them directly (no public API access without "
+            "credentials). Please switch to 'Paste text' mode and copy the post "
+            "text in instead."
+        )
+
+    # ── Generic news-site scraping (unchanged) ──
     try:
         resp = requests.get(url, headers=HEADERS, timeout=10)
         resp.raise_for_status()
@@ -120,33 +173,38 @@ def fetch_article(url):
         'word_count': len(body_text.split()),
     }
 
-def run_prediction(text, title, model_name):
-    if VECTORIZER is None:
-        raise RuntimeError("Vectorizer not loaded. Run main.py first.")
-    model = load_model(model_name)
-    if model is None:
-        raise RuntimeError(f"Model '{model_name}' not found. Run main.py first.")
+def run_prediction(text, title):
+    if VECTORIZER is None or MODEL is None:
+        raise RuntimeError("Model not loaded. Run main.py first.")
     combined  = title + ' ' + title + ' ' + text
     cleaned   = clean_text(combined)
     features  = VECTORIZER.transform([cleaned])
-    label     = model.predict(features)[0]
-    proba     = model.predict_proba(features)[0]
-    classes   = list(model.classes_)
+    label     = MODEL.predict(features)[0]
+    proba     = MODEL.predict_proba(features)[0]
+    classes   = list(MODEL.classes_)
     fake_prob = float(proba[classes.index('FAKE')]) * 100
     real_prob = float(proba[classes.index('REAL')]) * 100
-    return {
+
+    result = {
         'label':      label,
         'confidence': round(float(max(proba)) * 100, 1),
         'fake_prob':  round(fake_prob, 1),
         'real_prob':  round(real_prob, 1),
-        'model_used': model_name,
+        'model_used': 'Random Forest',
     }
+
+    # AI-text detection runs on the RAW (uncleaned) text — style signal
+    # depends on stopwords/punctuation that clean_text() strips out.
+    ai_result = run_ai_detection(text)
+    if ai_result:
+        result.update(ai_result)
+
+    return result
 
 @app.route('/predict', methods=['POST'])
 def predict():
-    data       = request.get_json(silent=True) or {}
-    url        = (data.get('url') or '').strip()
-    model_name = data.get('model', DEFAULT_MODEL)
+    data = request.get_json(silent=True) or {}
+    url  = (data.get('url') or '').strip()
     if not url:
         return jsonify({'error': 'No URL provided'}), 400
     try:
@@ -154,43 +212,41 @@ def predict():
     except (ValueError, ConnectionError) as e:
         return jsonify({'error': str(e)}), 422
     if article['word_count'] < 20:
-        return jsonify({'error': 'Not enough text extracted. The site may block scraping.'}), 422
+        return jsonify({'error': 'Not enough text extracted. The site may block scraping — try pasting the text instead.'}), 422
     try:
-        pred = run_prediction(article['body_text'], article['title'], model_name)
+        pred = run_prediction(article['body_text'], article['title'])
     except RuntimeError as e:
         return jsonify({'error': str(e)}), 503
     return jsonify({**pred, 'title': article['title'], 'preview': article['preview'],
-                    'domain': article['domain'], 'word_count': article['word_count']})
+                    'domain': article['domain'], 'word_count': article['word_count'],
+                    'platform': detect_platform(urlparse(url).netloc) or 'web'})
 
 @app.route('/predict-text', methods=['POST'])
 def predict_text():
-    data       = request.get_json(silent=True) or {}
-    text       = (data.get('text') or '').strip()
-    title      = (data.get('title') or '').strip()
-    model_name = data.get('model', DEFAULT_MODEL)
+    data  = request.get_json(silent=True) or {}
+    text  = (data.get('text') or '').strip()
+    title = (data.get('title') or '').strip()
     if not text:
         return jsonify({'error': 'No text provided'}), 400
     if len(text.split()) < 10:
         return jsonify({'error': 'Please provide at least 10 words of article text.'}), 400
     try:
-        pred = run_prediction(text, title, model_name)
+        pred = run_prediction(text, title)
     except RuntimeError as e:
         return jsonify({'error': str(e)}), 503
     preview = text[:500] + ('...' if len(text) > 500 else '')
     return jsonify({**pred, 'title': title or 'Pasted text', 'preview': preview,
-                    'domain': 'manual input', 'word_count': len(text.split())})
-
-@app.route('/models')
-def get_models():
-    models = available_models()
-    default = DEFAULT_MODEL if DEFAULT_MODEL in models else (models[0] if models else None)
-    return jsonify({'models': models, 'default': default})
+                    'domain': 'manual input', 'word_count': len(text.split()),
+                    'platform': 'manual'})
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'ok', 'vectorizer': VECTORIZER is not None,
-                    'models': available_models()})
+    return jsonify({
+        'status': 'ok',
+        'vectorizer': VECTORIZER is not None,
+        'model': MODEL is not None,
+        'ai_detector': AI_MODEL is not None,
+    })
 
 if __name__ == '__main__':
-    # Dev-only fallback. Production uses gunicorn (see Dockerfile CMD).
     app.run(debug=True, port=5000)
