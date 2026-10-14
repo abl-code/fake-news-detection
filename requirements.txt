@@ -1,0 +1,29 @@
+# ML / NLP — required by train.py, predict.py, preprocess.py
+numpy==2.4.3
+pandas==3.0.1
+scikit-learn==1.8.0
+scipy==1.17.1
+joblib==1.5.3
+threadpoolctl==3.6.0
+nltk==3.9.3
+regex==2026.2.28
+
+# Backend / API — required by app.py
+flask==3.0.3
+flask-cors==4.0.1
+gunicorn==22.0.0
+requests==2.32.3
+urllib3==2.8.0
+beautifulsoup4==4.12.3
+
+# Transitive deps pandas/sklearn need
+python-dateutil==2.9.0.post0
+six==1.17.0
+tzdata==2025.3
+packaging==26.0
+click==8.3.1
+datasets==5.0.1
+# fasttext is optional; built-in Unicode language detection needs no native extension.
+
+# Testing — required by test_predictions.py (pytest mode)
+pytest==8.3.4

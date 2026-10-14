@@ -5,10 +5,21 @@ Uses paragraph-length test cases (not bare headlines) since the model is
 trained on title x2 + full article body, and bare headlines produce
 out-of-distribution TF-IDF vectors (see Session Summary, Step 3 finding).
 
+Covers English (model.pkl/vectorizer.pkl) and Hindi (model_hi.pkl/
+vectorizer_hi.pkl) separately — each language's cases are scored against
+its own model, since the two are entirely separate classifiers.
+
+NOTE ON THE HINDI TEST CASES: drafted by an LLM, not a fluent/native
+Hindi speaker on the team. They have NOT been independently verified for
+factual accuracy, natural phrasing, or correct REAL/FAKE labeling.
+Review and correct before trusting these results — see README's Known
+Limitations if these remain unverified.
+
 Two modes:
   1. pytest test_predictions.py          -> soft assertions, CI-friendly
   2. python test_predictions.py          -> prints a markdown results table
      you can paste straight into the README's "known limitations" section
+     (print-only; run pytest separately to enforce regression checks)
 
 Soft assertions check *direction* (label) not exact confidence, since RF
 output will drift a few points across retrains even with the same data.
@@ -18,10 +29,12 @@ import os
 import pickle
 import sys
 
-import pytest
+try:
+    import pytest
+except ImportError:
+    pytest = None  # standalone `python test_predictions.py` mode doesn't need it
 
 # ── Locate model artifacts ───────────────────────────────────────────
-# Adjust ROOT if your .pkl files live somewhere else.
 HERE = os.path.dirname(os.path.abspath(__file__))
 CANDIDATE_DIRS = [
     os.path.join(HERE, "backend"),
@@ -33,7 +46,6 @@ sys.path.insert(0, HERE)
 try:
     from backend.src.preprocess import clean_text
 except ImportError:
-    # Fallback: allow running from inside backend/
     sys.path.insert(0, os.path.join(HERE, "backend"))
     from src.preprocess import clean_text  # type: ignore
 
@@ -43,21 +55,26 @@ def _find_file(filename):
         path = os.path.join(d, filename)
         if os.path.exists(path):
             return path
-    raise FileNotFoundError(
-        f"Could not find {filename} in any of {CANDIDATE_DIRS}. "
-        f"Run main.py first, or edit CANDIDATE_DIRS in this script."
-    )
+    return None  # caller decides whether missing is fatal or skippable
 
 
-def load_artifacts(model_name="random_forest"):
-    vec_path = _find_file("vectorizer.pkl")
+def load_artifacts(lang="en"):
+    """
+    Load (model, vectorizer) for the given language. English keeps the
+    unsuffixed filenames (model.pkl/vectorizer.pkl); every other
+    language uses model_<lang>.pkl/vectorizer_<lang>.pkl, matching
+    train.py's _artifact_names() convention. Returns (None, None) if
+    either file is missing, rather than raising — lets callers skip a
+    language cleanly instead of crashing the whole suite.
+    """
+    vec_name = "vectorizer.pkl" if lang == "en" else f"vectorizer_{lang}.pkl"
+    model_name = "model.pkl" if lang == "en" else f"model_{lang}.pkl"
 
-    # Project now consolidates to a single model.pkl (Random Forest).
-    # Try that first; fall back to a per-model file if one exists.
-    try:
-        model_path = _find_file("model.pkl")
-    except FileNotFoundError:
-        model_path = _find_file(f"model_{model_name}.pkl")
+    vec_path = _find_file(vec_name)
+    model_path = _find_file(model_name)
+
+    if vec_path is None or model_path is None:
+        return None, None
 
     with open(vec_path, "rb") as f:
         vectorizer = pickle.load(f)
@@ -66,9 +83,9 @@ def load_artifacts(model_name="random_forest"):
     return model, vectorizer
 
 
-def predict(text, model, vectorizer, title=""):
+def predict(text, model, vectorizer, title="", lang="en"):
     combined = title + " " + title + " " + text
-    cleaned = clean_text(combined)
+    cleaned = clean_text(combined, lang=lang)
     features = vectorizer.transform([cleaned])
     label = model.predict(features)[0]
     proba = model.predict_proba(features)[0]
@@ -83,9 +100,9 @@ def predict(text, model, vectorizer, title=""):
     }
 
 
-# ── Test cases ────────────────────────────────────────────────────────
+# ── English test cases ───────────────────────────────────────────────
 # expected: "REAL" | "FAKE" | None (None = no ground truth, log only)
-TEST_CASES = [
+EN_TEST_CASES = [
     {
         "id": "real_1_city_council",
         "category": "real_factual",
@@ -250,36 +267,134 @@ TEST_CASES = [
 ]
 
 
-# ── pytest fixtures + parametrized test ─────────────────────────────
-@pytest.fixture(scope="module")
-def artifacts():
-    return load_artifacts()
+# ── Hindi test cases ─────────────────────────────────────────────────
+# DRAFT ONLY — needs native/fluent review before these results are
+# trusted. Structurally mirrors the English set (real/fake/ambiguous)
+# but phrasing, naturalness, and factual-framing accuracy in Hindi have
+# not been verified by anyone fluent. Treat scores from this block as
+# provisional until reviewed.
+HI_TEST_CASES = [
+    {
+        "id": "hi_real_1_civic",
+        "category": "real_factual",
+        "expected": "REAL",
+        "text": (
+            "नगर निगम ने मंगलवार को आयोजित बैठक में सड़क मरम्मत के लिए बजट "
+            "बढ़ाने को औपचारिक स्वीकृति दे दी है। अधिकारियों ने बताया कि हाल ही में "
+            "कराए गए सर्वेक्षण के अनुसार शहर की करीब एक तिहाई सड़कों को अगले पांच "
+            "वर्षों में मरम्मत की आवश्यकता है। इस कार्य के लिए राज्य सरकार से मिलने "
+            "वाली सहायता राशि और वाहन पंजीकरण शुल्क में आंशिक वृद्धि से प्राप्त "
+            "राजस्व का उपयोग किया जाएगा।"
+        ),
+    },
+    {
+        "id": "hi_real_2_earnings",
+        "category": "real_factual",
+        "expected": "REAL",
+        "text": (
+            "एक प्रमुख खुदरा कंपनी के शेयरों में गुरुवार को करीब आठ प्रतिशत "
+            "की गिरावट दर्ज की गई, क्योंकि तिमाही वित्तीय नतीजे विश्लेषकों के अनुमान "
+            "से कमजोर रहे। कंपनी के प्रबंधन ने इसके लिए ग्राहकों की कम संख्या "
+            "और बढ़ती परिवहन लागत को जिम्मेदार ठहराया। हालांकि, कंपनी ने चालू वित्तीय "
+            "वर्ष के अपने निर्धारित लक्ष्यों को हासिल करने की उम्मीद जताई है।"
+        ),
+    },
+    {
+        "id": "hi_fake_3_obvious",
+        "category": "fake_obvious",
+        "expected": "FAKE",
+        "text": (
+            "बड़ा खुलासा! गुप्त दस्तावेजों से यह बात सामने आई है कि पानी की सप्लाई "
+            "में चुपचाप माइंड-कंट्रोल (दिमाग को नियंत्रित करने वाले) रसायन मिलाए जा "
+            "रहे हैं। एक अंदरूनी सूत्र के मुताबिक, यह खौफनाक साजिश वर्षों से चल रही "
+            "है और मुख्यधारा के वैज्ञानिकों को इस पर मुंह बंद रखने के लिए भारी रकम "
+            "दी जा रही है। इसे डिलीट किए जाने से पहले तुरंत शेयर करें!"
+        ),
+    },
+    {
+        "id": "hi_fake_4_subtle",
+        "category": "fake_subtle",
+        "expected": "FAKE",
+        "text": (
+            "सामने आए कुछ गोपनीय दस्तावेजों के अनुसार, कई बड़ी दवा निर्माता कंपनियों "
+            "को यह बात पहले से ज्ञात थी कि टीकों में प्रयुक्त होने वाला एक आम घटक "
+            "बच्चों में दीर्घकालिक तंत्रिका संबंधी विकार उत्पन्न करता है। हालांकि, "
+            "नियामक निकायों के साथ अंदरूनी समझौतों के माध्यम से इस तथ्य को छिपाया "
+            "गया। इस तथाकथित रिपोर्ट की पुष्टि किसी स्वतंत्र स्रोत द्वारा नहीं की गई है।"
+        ),
+    },
+    {
+        "id": "hi_ambig_5_opinion",
+        "category": "ambiguous",
+        "expected": None,
+        "text": (
+            "अब समय आ गया है कि राजनीतिक दल इस गंभीर मुद्दे पर बयानबाजी बंद करें "
+            "और इसे एक वास्तविक संकट के रूप में लें। सुधारों में हर साल की देरी "
+            "आम नागरिकों को भारी नुकसान पहुंचा रही है, और दोनों पक्षों की तरफ से "
+            "दिए जाने वाले बहाने अब लोगों को स्वीकार्य नहीं हैं।"
+        ),
+    },
+]
 
 
-@pytest.mark.parametrize("case", TEST_CASES, ids=[c["id"] for c in TEST_CASES])
-def test_prediction_direction(case, artifacts):
-    model, vectorizer = artifacts
-    result = predict(case["text"], model, vectorizer)
-
-    if case["expected"] is None:
-        pytest.skip(f"{case['id']}: no ground truth, log-only (see printed table)")
-
-    assert result["label"] == case["expected"], (
-        f"{case['id']} ({case['category']}): expected {case['expected']}, "
-        f"got {result['label']} (fake={result['fake_prob']}%, "
-        f"real={result['real_prob']}%)"
-    )
+# ── pytest fixtures + parametrized test (English) ───────────────────
+@pytest.fixture(scope="module") if pytest else (lambda f: f)
+def en_artifacts():
+    return load_artifacts(lang="en")
 
 
-# ── standalone runner: prints a markdown table for the README ──────
-def run_and_print_table():
-    model, vectorizer = load_artifacts()
+if pytest:
+    @pytest.mark.parametrize("case", EN_TEST_CASES, ids=[c["id"] for c in EN_TEST_CASES])
+    def test_prediction_direction_en(case, en_artifacts):
+        model, vectorizer = en_artifacts
+        if model is None:
+            pytest.skip("English model artifacts not found — run main.py first")
+        result = predict(case["text"], model, vectorizer, lang="en")
+
+        if case["expected"] is None:
+            pytest.skip(f"{case['id']}: no ground truth, log-only (see printed table)")
+
+        assert result["label"] == case["expected"], (
+            f"{case['id']} ({case['category']}): expected {case['expected']}, "
+            f"got {result['label']} (fake={result['fake_prob']}%, "
+            f"real={result['real_prob']}%)"
+        )
+
+    @pytest.fixture(scope="module")
+    def hi_artifacts():
+        return load_artifacts(lang="hi")
+
+    @pytest.mark.parametrize("case", HI_TEST_CASES, ids=[c["id"] for c in HI_TEST_CASES])
+    def test_prediction_direction_hi(case, hi_artifacts):
+        model, vectorizer = hi_artifacts
+        if model is None:
+            pytest.skip("Hindi model artifacts not found — Hindi dataset may not be present")
+        result = predict(case["text"], model, vectorizer, lang="hi")
+
+        if case["expected"] is None:
+            pytest.skip(f"{case['id']}: no ground truth, log-only (see printed table)")
+
+        assert result["label"] == case["expected"], (
+            f"{case['id']} ({case['category']}): expected {case['expected']}, "
+            f"got {result['label']} (fake={result['fake_prob']}%, "
+            f"real={result['real_prob']}%)"
+        )
+
+
+# ── standalone runner: prints a markdown table per language ─────────
+def _run_language(lang, cases, label):
+    model, vectorizer = load_artifacts(lang=lang)
+    if model is None:
+        print(f"\n[skip] {label}: model artifacts not found for lang='{lang}' — skipping.")
+        return
+
+    print(f"\n### {label} ({lang})\n")
     print(f"| ID | Category | Expected | Predicted | Fake % | Real % | Confidence | Match |")
     print(f"|---|---|---|---|---|---|---|---|")
 
     n_correct, n_scored = 0, 0
-    for case in TEST_CASES:
-        r = predict(case["text"], model, vectorizer)
+    for case in cases:
+        r = predict(case["text"], model, vectorizer, lang=lang)
         expected = case["expected"] or "—"
         if case["expected"] is not None:
             n_scored += 1
@@ -295,11 +410,21 @@ def run_and_print_table():
 
     print()
     if n_scored:
-        print(f"Scored accuracy on labeled cases: {n_correct}/{n_scored} "
+        print(f"Scored accuracy ({label}, {lang}): {n_correct}/{n_scored} "
               f"({100 * n_correct / n_scored:.1f}%)")
-    print("Ambiguous cases (satire, opinion, poor-sourcing) intentionally have "
-          "no ground truth — log their predictions as documented limitations, "
-          "not pass/fail results.")
+
+
+def run_and_print_table():
+    _run_language("en", EN_TEST_CASES, "English")
+    _run_language(
+        "hi", HI_TEST_CASES,
+        "Hindi (DRAFT test cases — unreviewed by a fluent speaker, treat as provisional)",
+    )
+    print(
+        "\nAmbiguous cases (satire, opinion, poor-sourcing) intentionally have "
+        "no ground truth — log their predictions as documented limitations, "
+        "not pass/fail results."
+    )
 
 
 if __name__ == "__main__":

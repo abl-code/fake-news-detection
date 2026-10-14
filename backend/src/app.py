@@ -1,8 +1,8 @@
 """
 app.py  —  Flask backend for Fake News Detector
 Endpoints:
-  POST /predict        { "url": "..." }
-  POST /predict-text   { "text": "...", "title": "..." }
+  POST /predict        { "url": "...", "lang": "en" | "hi" (optional) }
+  POST /predict-text   { "text": "...", "title": "...", "lang": "en" | "hi" (optional) }
   GET  /health          -> status
 """
 
@@ -12,18 +12,46 @@ from flask       import Flask, request, jsonify
 from flask_cors  import CORS
 from bs4         import BeautifulSoup
 from urllib.parse import urlparse
+import json
+from .safe_fetch import fetch_public
 
-from .preprocess import clean_text
+from .preprocess import clean_text, detect_language
 # ── near the top, alongside VECTORIZER / MODEL loading ──
 import numpy as np
 from scipy.sparse import hstack, csr_matrix
 from .train_ai_detector import stylometric_features  # reuse feature logic
 
 app = Flask(__name__)
-CORS(app)
+app.config['MAX_CONTENT_LENGTH'] = 128 * 1024
+origins = [origin.strip() for origin in os.getenv('CORS_ORIGINS', '').split(',') if origin.strip()]
+if origins:
+    CORS(app, origins=origins)
+
+@app.before_request
+def validate_payload():
+    if request.method == 'POST':
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify(error='Provide a JSON object.'), 400
+        for key in ('url', 'text', 'title', 'lang'):
+            if key in data and not isinstance(data[key], str):
+                return jsonify(error=f'{key} must be a string.'), 400
+        if data.get('lang') and data['lang'].strip().lower() not in ('en', 'hi'):
+            return jsonify(error='Supported languages: en, hi.'), 400
+
+@app.errorhandler(413)
+def payload_too_large(error):
+    return jsonify(error='Article exceeds the 128 KB request limit.'), 413
 
 BASE      = os.path.dirname(__file__)
 MODEL_DIR = os.path.join(BASE, '..')
+
+# Languages the fake-news classifier has (or may have) trained artifacts
+# for. Add to this list as new languages get trained — nothing else in
+# this file needs to change to pick them up, since loading is name-based.
+SUPPORTED_LANGS = ['en', 'hi']
+
+
 def load_pickle(name):
     path = os.path.join(MODEL_DIR, name)
     if not os.path.exists(path):
@@ -31,14 +59,24 @@ def load_pickle(name):
     with open(path, 'rb') as f:
         return pickle.load(f)
 
+
 AI_MODEL    = load_pickle('ai_detector_model.pkl')
 AI_WORD_VEC = load_pickle('ai_detector_word_vec.pkl')
 AI_CHAR_VEC = load_pickle('ai_detector_char_vec.pkl')
 print(f"AI detector: {'loaded' if AI_MODEL else 'NOT FOUND - run main.py first'}")
 
 
-def run_ai_detection(text):
-    """Returns None if the AI detector isn't available (fails soft)."""
+def run_ai_detection(text, lang):
+    """
+    Returns None if the AI detector isn't available, OR if `lang` isn't
+    English — the AI detector is trained exclusively on HC3 (English
+    human vs. ChatGPT answers), so there's no meaningful result to
+    return for other languages. Callers treat None as "omit AI fields
+    from the response entirely" (see run_prediction()'s `if ai_result:`
+    check) rather than surfacing a null/placeholder result.
+    """
+    if lang != 'en':
+        return None
     if not (AI_MODEL and AI_WORD_VEC and AI_CHAR_VEC):
         return None
     X_word  = AI_WORD_VEC.transform([text])
@@ -55,24 +93,35 @@ def run_ai_detection(text):
         'ai_probability': round(ai_prob, 1),
         'ai_confidence': round(float(max(proba)) * 100, 1),
     }
-def load_vectorizer():
-    path = os.path.join(MODEL_DIR, 'vectorizer.pkl')
-    if not os.path.exists(path):
-        return None
-    with open(path, 'rb') as f:
-        return pickle.load(f)
 
-def load_model():
-    path = os.path.join(MODEL_DIR, 'model.pkl')
-    if not os.path.exists(path):
-        return None
-    with open(path, 'rb') as f:
-        return pickle.load(f)
 
-VECTORIZER = load_vectorizer()
-MODEL      = load_model()
-print(f"Vectorizer: {'loaded' if VECTORIZER else 'NOT FOUND - run main.py first'}")
-print(f"Model (Random Forest): {'loaded' if MODEL else 'NOT FOUND - run main.py first'}")
+def _artifact_names(lang):
+    if lang == 'en':
+        return 'model.pkl', 'vectorizer.pkl'
+    return f'model_{lang}.pkl', f'vectorizer_{lang}.pkl'
+
+
+def load_fake_news_models():
+    """
+    Load every available per-language (model, vectorizer) pair into a
+    dict keyed by lang code, e.g. {'en': (model, vec), 'hi': (model, vec)}.
+    A language with missing files is silently omitted (not an error) —
+    checked at request time via lang not in MODELS.
+    """
+    models = {}
+    for lang in SUPPORTED_LANGS:
+        model_name, vec_name = _artifact_names(lang)
+        model = load_pickle(model_name)
+        vec   = load_pickle(vec_name)
+        if model is not None and vec is not None:
+            models[lang] = (model, vec)
+    return models
+
+
+MODELS = load_fake_news_models()
+for lang in SUPPORTED_LANGS:
+    status = 'loaded' if lang in MODELS else 'NOT FOUND'
+    print(f"Fake-news model [{lang}]: {status}")
 
 HEADERS = {
     'User-Agent': (
@@ -102,13 +151,9 @@ def fetch_x_via_oembed(url):
     """X/Twitter's public oEmbed endpoint returns post HTML without auth,
     for PUBLIC posts only. This is the only reliable no-auth path for X."""
     try:
-        resp = requests.get(
-            'https://publish.twitter.com/oembed',
-            params={'url': url, 'omit_script': 'true'},
-            headers=HEADERS, timeout=10,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        from urllib.parse import urlencode
+        endpoint = 'https://publish.twitter.com/oembed?' + urlencode({'url': url, 'omit_script': 'true'})
+        data = json.loads(fetch_public(endpoint, HEADERS))
         soup = BeautifulSoup(data.get('html', ''), 'html.parser')
         text = soup.get_text(separator=' ', strip=True)
         text = re.sub(r'\s+', ' ', text).strip()
@@ -146,16 +191,13 @@ def fetch_article(url):
 
     # ── Generic news-site scraping (unchanged) ──
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=10)
-        resp.raise_for_status()
-    except requests.exceptions.Timeout:
-        raise ConnectionError("Request timed out")
-    except requests.exceptions.ConnectionError:
-        raise ConnectionError("Could not reach the URL")
-    except requests.exceptions.HTTPError:
-        raise ConnectionError(f"HTTP error {resp.status_code}")
+        html = fetch_public(url, HEADERS)
+    except ValueError:
+        raise
+    except Exception:
+        raise ConnectionError('Could not retrieve the article. Try pasting its text.')
 
-    soup = BeautifulSoup(resp.text, 'html.parser')
+    soup = BeautifulSoup(html, 'html.parser')
     for tag in soup(['script','style','nav','footer','header','aside','form','noscript']):
         tag.decompose()
 
@@ -173,15 +215,30 @@ def fetch_article(url):
         'word_count': len(body_text.split()),
     }
 
-def run_prediction(text, title):
-    if VECTORIZER is None or MODEL is None:
-        raise RuntimeError("Model not loaded. Run main.py first.")
+def run_prediction(text, title, lang=None):
+    """
+    lang: 'en' | 'hi' | None. If None, auto-detected from `text` via
+    detect_language(). An explicit lang from the request always wins
+    over auto-detection — the caller (e.g. a user-set UI toggle) knows
+    better than a statistical guess on possibly short/noisy input.
+    """
+    if lang is None:
+        lang = detect_language(text)
+
+    if lang not in MODELS:
+        available = ', '.join(sorted(MODELS)) or 'none'
+        raise RuntimeError(
+            f"No trained model available for lang='{lang}'. "
+            f"Available: {available}. Run main.py to train it first."
+        )
+    model, vectorizer = MODELS[lang]
+
     combined  = title + ' ' + title + ' ' + text
-    cleaned   = clean_text(combined)
-    features  = VECTORIZER.transform([cleaned])
-    label     = MODEL.predict(features)[0]
-    proba     = MODEL.predict_proba(features)[0]
-    classes   = list(MODEL.classes_)
+    cleaned   = clean_text(combined, lang=lang)
+    features  = vectorizer.transform([cleaned])
+    label     = model.predict(features)[0]
+    proba     = model.predict_proba(features)[0]
+    classes   = list(model.classes_)
     fake_prob = float(proba[classes.index('FAKE')]) * 100
     real_prob = float(proba[classes.index('REAL')]) * 100
 
@@ -191,11 +248,13 @@ def run_prediction(text, title):
         'fake_prob':  round(fake_prob, 1),
         'real_prob':  round(real_prob, 1),
         'model_used': 'Random Forest',
+        'lang':       lang,
     }
 
     # AI-text detection runs on the RAW (uncleaned) text — style signal
     # depends on stopwords/punctuation that clean_text() strips out.
-    ai_result = run_ai_detection(text)
+    # Gated to English only inside run_ai_detection() — see its docstring.
+    ai_result = run_ai_detection(text, lang)
     if ai_result:
         result.update(ai_result)
 
@@ -205,6 +264,7 @@ def run_prediction(text, title):
 def predict():
     data = request.get_json(silent=True) or {}
     url  = (data.get('url') or '').strip()
+    lang = (data.get('lang') or '').strip().lower() or None
     if not url:
         return jsonify({'error': 'No URL provided'}), 400
     try:
@@ -214,7 +274,7 @@ def predict():
     if article['word_count'] < 20:
         return jsonify({'error': 'Not enough text extracted. The site may block scraping — try pasting the text instead.'}), 422
     try:
-        pred = run_prediction(article['body_text'], article['title'])
+        pred = run_prediction(article['body_text'], article['title'], lang=lang)
     except RuntimeError as e:
         return jsonify({'error': str(e)}), 503
     return jsonify({**pred, 'title': article['title'], 'preview': article['preview'],
@@ -226,12 +286,13 @@ def predict_text():
     data  = request.get_json(silent=True) or {}
     text  = (data.get('text') or '').strip()
     title = (data.get('title') or '').strip()
+    lang  = (data.get('lang') or '').strip().lower() or None
     if not text:
         return jsonify({'error': 'No text provided'}), 400
     if len(text.split()) < 10:
         return jsonify({'error': 'Please provide at least 10 words of article text.'}), 400
     try:
-        pred = run_prediction(text, title)
+        pred = run_prediction(text, title, lang=lang)
     except RuntimeError as e:
         return jsonify({'error': str(e)}), 503
     preview = text[:500] + ('...' if len(text) > 500 else '')
@@ -242,11 +303,12 @@ def predict_text():
 @app.route('/health')
 def health():
     return jsonify({
-        'status': 'ok',
-        'vectorizer': VECTORIZER is not None,
-        'model': MODEL is not None,
+        'status': 'ok' if 'en' in MODELS else 'unavailable',
+        'fake_news_models': {lang: True for lang in MODELS},
+        'fake_news_models_missing': [l for l in SUPPORTED_LANGS if l not in MODELS],
         'ai_detector': AI_MODEL is not None,
-    })
+        'ai_detector_note': 'English-only (trained on HC3)',
+    }), (200 if 'en' in MODELS else 503)
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)

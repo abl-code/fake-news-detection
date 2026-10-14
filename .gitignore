@@ -4,6 +4,12 @@
 
 # Virtual environment
 venv/
+.venv/
+.env
+.pytest_cache/
+pytest-cache-files-*/
+.qodo/
+deployment/
 
 # Python cache
 __pycache__/

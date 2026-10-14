@@ -1,213 +1,221 @@
 # Fake News Detection
 
-A full-stack machine learning system for detecting fake news and AI-generated
-text. Two independent classifiers — a fake-news detector and an AI-text
-detector — run in parallel behind a Flask API, with a React frontend and a
-Docker Compose deployment.
+A full-stack demo that classifies news article text as **REAL** or **FAKE** and optionally estimates whether English text is AI-written. Built with React, Flask, TF-IDF, and Random Forest classifiers.
 
-This project has been through two rounds of data-leakage debugging (documented
-below), and the point of documenting them isn't to hide a rough draft — it's
-that catching a 99%+ "too good to be true" accuracy score, tracing it back to
-a specific leakage source, and fixing it is the actual engineering work.
-Anyone can report a high accuracy number; showing the audit trail behind it is
-the more useful signal.
+**These predictions are experimental signals, not verified fact-checking.** Model confidence is a class probability estimate, not the probability that an article is true.
+
+## Project status
+
+- Local Docker deployment verified on **14 October 2026**.
+- English news classification and optional English AI-text detection are available in the current local artifacts.
+- Hindi preprocessing and model routing are implemented; trained Hindi artifacts are not included in this checkout.
+- Public hosting, a public demo link, and CI/CD are not configured yet.
+- Source code and trained artifacts have different distribution paths: models and datasets are excluded from Git.
+
+## Features
+
+- Analyze an article URL or paste article text and an optional title.
+- Return REAL/FAKE probabilities, confidence, an article preview, and word count.
+- Automatically route English and Hindi text to an available language model.
+- Show an AI-writing estimate when all English AI-detector artifacts are available.
+- Block private-network URL destinations, validate redirects, and limit downloaded responses.
+- Run the frontend and API together with Docker Compose.
+
+URL extraction depends on the source website. Paywalls, JavaScript-rendered pages, and social-media login requirements can prevent extraction; paste the article text instead.
 
 ## Architecture
 
-```
-fake-news-detection/
-├── backend/
-│   ├── src/
-│   │   ├── preprocess.py         # Text cleaning pipeline
-│   │   ├── train.py              # Fake-news model training (ISOT)
-│   │   ├── train_ai_detector.py  # AI-text detector training (HC3)
-│   │   ├── predict.py            # CLI prediction helper
-│   │   ├── app.py                # Flask API
-│   │   └── check_leakage.py      # Dataset leakage audit script
-│   ├── data/                     # Dataset CSVs (not included in repo)
-│   ├── Dockerfile
-│   └── requirements.txt
-├── frontend/
-│   ├── src/
-│   │   ├── App.jsx                # React UI
-│   │   └── main.jsx
-│   └── Dockerfile
-├── test_predictions.py           # Regression suite (paragraph-length cases)
-├── docker-compose.yml
-└── main.py                        # Local training entry point
+```text
+Browser -> nginx frontend -> /api -> Flask / Gunicorn -> trained models
+             port 8080               internal port 5000
 ```
 
-## Stack
+The browser uses `/api` on the same origin by default. nginx forwards those requests to the internal backend; port 5000 is not published by Compose.
 
-- **Backend:** Python, Flask, scikit-learn, NLTK
-- **Frontend:** React, Vite
-- **Deployment:** Docker, Docker Compose, nginx
-- **ML:** TF-IDF (word-level + char n-gram) → Random Forest, plus hand-crafted
-  stylometric features for the AI-text detector
-
-## How It Works
-
-Two independent classifiers run on any submitted text (via URL scrape or
-pasted text):
-
-1. **Fake-news detector** — TF-IDF (unigrams + bigrams) → Random Forest,
-   trained on the ISOT Fake News dataset (title × 2 + article body).
-2. **AI-generated-text detector** — TF-IDF (word-level + char 3–5-grams) +
-   stylometric features → Random Forest, trained on HC3
-   (`Hello-SimpleAI/HC3`, human vs. ChatGPT answers).
-
-Both return a label and confidence score; the AI-detector is explicitly
-surfaced in the UI as a lower-confidence secondary signal (see
-[Limitations](#known-limitations) below).
-
-## Installation
-
-```bash
-git clone https://github.com/abl-code/fake-news-detection.git
-cd fake-news-detection
-
-python -m venv venv
-venv\Scripts\activate        # Windows
-# source venv/bin/activate   # macOS/Linux
-
-pip install -r backend/requirements.txt
+```text
+backend/
+  src/app.py                 Flask routes and prediction pipeline
+  src/preprocess.py          English/Hindi cleaning and language detection
+  src/train.py               News dataset loading and model training
+  src/train_ai_detector.py   HC3 AI-text training and style features
+  src/safe_fetch.py          Public-IP validation and bounded URL fetching
+  src/check_leakage.py       Dataset source/formatting audit
+  src/predict.py             Standalone prediction helper
+  Dockerfile                 Backend runtime image
+  *.pkl                      Local trained artifacts (gitignored)
+  data/                      Local training datasets (gitignored)
+frontend/
+  src/App.jsx                React interface
+  nginx.conf                 API proxy and request limits
+  Dockerfile                 Frontend build and web server
+main.py                      Training entry point
+requirements.txt             Pinned direct Python dependencies
+docker-compose.yml            Local deployment
+tests/                        API and URL-fetch protection tests
+test_predictions.py           Model prediction regression cases
 ```
 
-### Dataset setup
+## Quick start with Docker
 
-Place these files in `backend/data/`:
+### Requirements
 
-- [ISOT Fake and Real News](https://www.kaggle.com/datasets/clmentbisaillon/fake-and-real-news-dataset) → `Fake.csv`, `True.csv`
-- HC3 is pulled automatically via `datasets.load_dataset("Hello-SimpleAI/HC3", "default", revision="refs/convert/parquet")` — no manual download needed.
+- Docker Desktop running with Linux containers on Windows, or Docker Engine with the Compose plugin on Linux.
+- Trusted English model artifacts in `backend/`.
+- Internet access for the first image build.
 
-### Train locally
+A fresh clone does **not** contain model files. Copy trusted artifacts from your training environment or train them using the instructions below before building.
 
-```bash
-python main.py
+| Feature | Required files in `backend/` |
+| --- | --- |
+| English news classification | `model.pkl`, `vectorizer.pkl` |
+| Hindi news classification (optional) | `model_hi.pkl`, `vectorizer_hi.pkl` |
+| English AI-text detection (optional) | `ai_detector_model.pkl`, `ai_detector_word_vec.pkl`, `ai_detector_char_vec.pkl` |
+
+Use the same scikit-learn version for training and serving. Never load untrusted pickle files; loading a pickle can execute code.
+
+From the repository root:
+
+```powershell
+docker compose up -d --build
+docker compose ps
 ```
 
-### Run with Docker
+Open [http://localhost:8080](http://localhost:8080). Check [http://localhost:8080/api/health](http://localhost:8080/api/health); a ready English model returns HTTP 200 with `status: "ok"`.
 
-```bash
-docker compose up --build
+Useful commands:
+
+```powershell
+docker compose logs --tail=100
+docker compose down
 ```
 
-- Frontend: `http://localhost:8080`
-- Backend API: `http://localhost:5000`
+Docker builds use existing artifacts. They do not train models or download training data, and raw datasets are excluded from the image.
 
-Model training runs at image build time (`RUN python main.py` in
-`backend/Dockerfile`), so `True.csv`/`Fake.csv` must exist locally before
-`docker compose up --build`.
+## Free temporary demo link
+
+You can share the locally running app using a **Cloudflare Quick Tunnel**, without buying a server or domain.
+
+1. Start the app with Docker Compose.
+2. Install `cloudflared` using the [official download instructions](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/).
+3. In another terminal, run:
+
+```powershell
+cloudflared tunnel --url http://localhost:8080
+```
+
+Share the HTTPS `trycloudflare.com` address printed in that terminal. Your computer, internet connection, Docker containers, and tunnel must stay running. The address is temporary, and anyone with the link can access the app. Stop the tunnel with Ctrl+C when the demo ends.
+
+Quick Tunnels are for testing and development, not an always-on production service. See [Cloudflare Quick Tunnels](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/). No tunnel or public URL is currently configured in this project.
+
+## Local development without Docker
+
+Use Python **3.13** and Node.js **22**, matching the Docker build environments.
+
+From the repository root on Windows:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m flask --app backend.src.app run --port 5000
+```
+
+On Linux/macOS, use `.venv/bin/python` instead of `.venv\Scripts\python.exe`.
+
+In another terminal:
+
+```powershell
+cd frontend
+npm.cmd ci
+npm.cmd run dev
+```
+
+Use `npm` instead of `npm.cmd` on Linux/macOS. Open the URL printed by Vite. Its development proxy forwards `/api` to Flask on port 5000.
+
+If `frontend/.env` already sets `VITE_API_URL`, remove that setting to use the development proxy, or configure backend `CORS_ORIGINS` with the exact frontend origin. For a separately hosted backend, set `VITE_API_URL` before building the frontend; Vite embeds it in the bundle.
+
+## Training
+
+Training is optional when compatible artifacts are already available. It can take significant time and memory.
+
+1. Install the root Python requirements in your virtual environment.
+2. Place the English ISOT files at `backend/data/True.csv` and `backend/data/Fake.csv`. See the [ISOT dataset listing](https://www.kaggle.com/datasets/clmentbisaillon/fake-and-real-news-dataset).
+3. For optional Hindi training, place HFDND CSV files in `backend/data/HFDND/`, or an ISOT-format pair in `backend/data/hi/`. Check `backend/src/train.py` for the expected CSV schema.
+4. Run from the repository root:
+
+```powershell
+.\.venv\Scripts\python.exe main.py
+```
+
+`main.py` trains available English/Hindi news models, skipping languages whose datasets are missing, then trains the English AI-text detector. HC3 is downloaded from Hugging Face during AI training, so that step needs internet access.
+
+News classification uses double-weighted titles plus article bodies, a 10,000-feature unigram/bigram TF-IDF vectorizer, and a 200-tree Random Forest. AI detection uses word and character TF-IDF features plus stylometric features with a separate 250-tree Random Forest.
+
+English/Hindi cleaning uses built-in stopword lists and script-aware regular expressions. Optional fastText identification can be installed separately with its language model; the default installation uses the Unicode heuristic fallback.
 
 ## API
 
-| Endpoint | Method | Description |
-|---|---|---|
-| `/predict` | POST | `{ "url": "..." }` — scrapes and classifies a URL |
-| `/predict-text` | POST | `{ "text": "...", "title": "..." }` — classifies pasted text |
-| `/health` | GET | Model/vectorizer load status |
+These are backend routes. When using Docker Compose, prefix them with `/api` in browser requests.
 
-## Regression Testing
+| Method | Route | Request / behavior |
+| --- | --- | --- |
+| GET | `/health` | 200 when the English model is available; otherwise 503 |
+| POST | `/predict` | `{ "url": "https://example.com/article", "lang": "en" }` |
+| POST | `/predict-text` | `{ "text": "article text...", "title": "optional title", "lang": "en" }` |
 
-`test_predictions.py` runs a fixed set of paragraph-length test cases against
-the trained model — real factual news, obvious fake news, *subtle* fake news
-(calm tone, no sensational vocabulary), and ambiguous cases (satire, opinion,
-poorly-sourced-but-real reporting) with no ground truth label.
+`lang` is optional and accepts `en` or `hi`; when omitted, language is detected automatically. Pasted text needs at least 10 words; URL extraction needs at least 20 words.
 
-```bash
-python test_predictions.py    # prints a markdown results table
-pytest test_predictions.py    # soft assertions, CI-friendly
+Responses include `label`, `confidence`, `fake_prob`, `real_prob`, `model_used`, `lang`, `title`, `preview`, `domain`, `word_count`, and `platform`. English responses may also include `ai_label`, `ai_probability`, and `ai_confidence`.
+
+Invalid inputs return 400, oversized requests 413, extraction failures 422, nginx rate limits 429, and missing language models 503.
+
+## Tests and verification
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests -q
+.\.venv\Scripts\python.exe -m pytest test_predictions.py -q
+docker compose config --quiet
 ```
 
-Paragraph-length inputs are used deliberately: the model is trained on
-`title × 2 + full article body`, so bare headlines produce out-of-distribution
-TF-IDF vectors and are not a reliable way to evaluate it.
+Build the frontend from `frontend/` with `npm.cmd run build` (or `npm run build` on Linux/macOS).
 
-## Known Limitations
+| Check | Last verified result |
+| --- | --- |
+| Deployment/API tests, 7 October 2026 | 9 passed |
+| Combined deployment and model suite, 7 October 2026 | 16 passed, 8 skipped, 2 failed |
+| Frontend production build | Passed |
+| Local Compose configuration | Passed |
+| Docker images and local container startup, 14 October 2026 | Passed; backend healthy |
+| English prediction through nginx, 14 October 2026 | Passed |
+| Public hosting and external demo link | Not yet configured |
 
-These are documented rather than engineered away, because silently tuning a
-model until every test case passes produces a worse, less honest picture of
-what it actually does.
+The two model failures remain visible: a real medical-study example is classified as FAKE, and a subtle fake weather-conspiracy example as REAL. Hindi cases skip when their artifacts are absent; unlabeled cases also skip. These small regression examples are not a broad accuracy benchmark.
 
-### The classifier tracks rhetorical register, not claim plausibility
+## Known limitations
 
-A regression run against 9 labeled paragraph-length test cases scored
-**7/9 (77.8%)**, with two informative misses:
+- The classifier learns wording, source, and style patterns; it does not verify claims against evidence. Calm misinformation can pass, and cautious factual reporting can be flagged.
+- English training data is concentrated in historical US political news. Generalization to current events, other countries, and other topics has not been established.
+- Short headlines differ from the full articles used in training. Prefer paragraph-length inputs.
+- AI-writing detection can misclassify edited text and non-native English writing. It is English-only and should not be used as proof of authorship.
+- Hindi model routing exists, but trained Hindi files are missing locally. The Hindi regression examples require independent language and label review.
+- Some sites block scraping or require login. Use pasted text when extraction fails.
+- Training includes Reuters-tag removal and HC3 spacing normalization to reduce known source/formatting leakage. Those measures do not establish general real-world reliability.
 
-| Case | Expected | Predicted | Confidence | What it shows |
-|---|---|---|---|---|
-| Calm-toned conspiratorial claim, hedged sourcing ("a retired intelligence official says...") | FAKE | REAL | 91.0% | A false claim delivered in measured, well-sourced-sounding prose was misclassified with high confidence. |
-| Hedged, cautious academic reporting ("the authors cautioned... called for larger trials") | REAL | FAKE | 57.5% | Careful, uncertainty-acknowledging language — standard in legitimate science journalism — pushed the model toward FAKE. |
+## Deployment safeguards
 
-Three additional cases with no objective ground truth (satire, an opinion
-column, and a real-but-thinly-sourced news item) all classified as FAKE, two
-at high confidence (73.5%, 90.0%). This is consistent with the same pattern:
-persuasive or rhetorically loaded language resembles the FAKE class's style
-even when the underlying content is legitimate journalism.
+- Backend runs as a non-root user with one Gunicorn worker and two threads.
+- Backend port stays internal to the Compose network; local frontend binds to loopback.
+- Same-origin API requests do not require open CORS; separate origins must be explicitly configured.
+- Requests are limited to 128 KB; downloaded responses to 2 MB.
+- URL fetching validates public destination IPs, pins connections to validated addresses, and checks redirects.
+- nginx limits API traffic to 10 requests/minute per direct peer with a burst of five. Behind a tunnel, this can become a shared limit; configure trusted client-IP handling before serving many users.
 
-**Conclusion:** this is a TF-IDF + Random Forest text classifier, and like
-essentially all classifiers of this type, it is substantially a *style*
-detector — sensationalized tone, hedging patterns, and lexical choices — not
-a fact-checker. It should be read as a signal about how a piece of text is
-written, not a verdict on whether its claims are true. This is stated
-explicitly here rather than left for a reviewer to discover independently.
+## Future work
 
-### Domain specificity (ISOT)
-
-The fake-news training data (ISOT) is almost entirely U.S. political news
-from 2016–2017. Accuracy on non-U.S. or non-political topics has not been
-independently validated at scale — a single non-U.S. central-bank test case
-classified correctly, but this is not sufficient evidence of general
-cross-domain reliability and should not be assumed.
-
-### AI-text detector reliability (HC3)
-
-- HC3's `human_answers` are drawn from a different corpus distribution
-  (length, variance) than `chatgpt_answers` — see the leakage note below.
-  Even after fixing the leakage bug this introduces, the underlying
-  length/style disparity between the two classes is a property of the
-  dataset's collection methodology, not something that can be fully removed
-  through preprocessing.
-- The UI surfaces this detector with an explicit caveat
-  ("AI-text detectors are known to be unreliable, especially on edited or
-  non-native English writing — treat this as a signal, not a verdict") rather
-  than presenting it as authoritative.
-
-### Two data-leakage bugs were found and fixed during development
-
-**1. ISOT Reuters-tag leakage.** 99.2% of REAL articles in the ISOT dataset
-carried a Reuters wire-service tag entirely absent from FAKE articles — the
-model was substantially learning to detect that tag, not detect fake news.
-Fixed with a `_strip_reuters_tag()` preprocessing step in `train.py`. This
-dropped held-out accuracy from a suspicious ~99.8% into a more defensible
-85–93% range, which is the expected direction and magnitude for a genuine
-fix.
-
-**2. HC3 tokenization-artifact leakage.** The AI-text detector originally
-reported 100.00% held-out accuracy — implausible for this task even for
-published detectors. Investigation found `human_answers` contained systematic
-detokenization artifacts (`"word ."` instead of `"word."`, `"wo n't"` instead
-of `"won't"`) entirely absent from `chatgpt_answers`, which the char n-gram
-features were trivially learning as a near-perfect proxy for "human." Fixed
-with a `_normalize_spacing()` step applied uniformly to both classes before
-feature extraction.
-
-Both leakage sources were metadata/formatting artifacts of how the datasets
-were assembled, not signal the model was supposed to learn — which is part
-of why validating a suspiciously high accuracy score before trusting it
-matters more than the score itself.
-
-## Tech Stack
-
-- **Python** — backend, ML pipeline
-- **scikit-learn** — TF-IDF vectorization, Random Forest classification
-- **NLTK** — tokenization, stopword removal
-- **Flask** + **flask-cors** — API
-- **BeautifulSoup** — URL scraping
-- **React** + **Vite** — frontend
-- **Docker** / **docker-compose** / **nginx** — deployment
+- Publish a demo link or configure persistent hosting.
+- Add CI/CD after the deployment method is settled.
+- Train and independently validate Hindi artifacts.
+- Evaluate broader datasets and improve the documented model failure cases.
 
 ## Author
 
-**Abiel Varghese**
-[github.com/abl-code](https://github.com/abl-code)
+**Abiel Varghese** — [GitHub](https://github.com/abl-code)

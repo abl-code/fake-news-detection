@@ -1,0 +1,15 @@
+.git
+.qodo
+.env
+**/.env
+**/.env.*
+venv
+.venv
+**/node_modules
+**/__pycache__
+**/.pytest_cache
+pytest-cache-files-*
+frontend/dist
+backend/data
+*.log
+deployment

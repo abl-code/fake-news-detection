@@ -3,25 +3,23 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    ports:
-      - "5000:5000"
     restart: unless-stopped
-    # AI detector's char n-gram + RF (250 trees) training at build time,
-    # plus HC3 download, is memory-hungry — give the build stage headroom
-    # if you hit OOM kills during `docker compose up --build`.
-    deploy:
-      resources:
-        limits:
-          memory: 4g
-
+    environment:
+      CORS_ORIGINS: ""
+    expose:
+      - "5000"
+    mem_limit: 4g
+    security_opt:
+      - no-new-privileges:true
   frontend:
     build:
       context: .
       dockerfile: frontend/Dockerfile
       args:
-        VITE_API_URL: http://localhost:5000
+        VITE_API_URL: /api
     ports:
-      - "8080:80"
+      - "127.0.0.1:8080:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     restart: unless-stopped
